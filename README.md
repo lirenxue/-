@@ -18,20 +18,6 @@
 - 中心缓存（CentralCache）：用于管理多个线程共享的内存块，支持批量分配和回收，优化内存利用率。
 - 页面缓存（PageCache）：负责从操作系统申请和释放大块内存，支持内存块的合并和分割，减少内存碎片。
 - 自旋锁和原子操作：在多线程环境下使用自旋锁和原子操作，确保线程安全的同时减少锁的开销。
-这个版本实现了一个高效的内存池，旨在优化内存分配和释放的性能，特别是在多线程环境下。
-内存池通过分层缓存架构来管理内存，主要包括以下三层：
-1. ThreadCache（线程本地缓存）
-每个线程独立的内存缓存
-无锁操作，快速分配和释放
-减少线程间竞争，提高并发性能
-2. CentralCache（中心缓存）
-管理多个线程共享的内存块
-通过自旋锁保护，确保线程安全
-批量从PageCache获取内存，分配给ThreadCache
-3. PageCache（页缓存）
-从操作系统获取大块内存
-将大块内存切分成小块，供CentralCache使用
-负责内存的回收和再利用。
 ```
 +-------------------+
 |  应用请求内存     |
@@ -99,8 +85,147 @@ make clean
 ![alt text](/memory-pool-main/images/v1_cmake&make.png)
 #### 1个线程10轮次、3个线程10轮次、3个线程50轮次下的测试情况：
 ![alt text](/memory-pool-main/images/v1_test.png)
+#### 测试代码
+```
+#include <iostream>
+#include <thread>
+#include <vector>
 
+#include "../include/MemoryPool.h"
 
+using namespace Lrx_memoryPool;
+
+// 测试用例
+class P1 
+{
+    int id_;
+};
+
+class P2 
+{
+    int id_[5];
+};
+
+class P3
+{
+    int id_[10];
+};
+
+class P4
+{
+    int id_[20];
+};
+
+// 单轮次申请释放次数 线程数 轮次
+void BenchmarkMemoryPool(size_t ntimes, size_t nworks, size_t rounds)
+{
+	std::vector<std::thread> vthread(nworks); // 线程池
+	size_t total_costtime = 0;
+	for (size_t k = 0; k < nworks; ++k) // 创建 nworks 个线程
+	{
+		vthread[k] = std::thread([&]() {
+			for (size_t j = 0; j < rounds; ++j)
+			{
+				size_t begin1 = clock();
+				for (size_t i = 0; i < ntimes; i++)
+				{
+                    P1* p1 = newElement<P1>(); // 内存池对外接口
+                    deleteElement<P1>(p1);
+                    P2* p2 = newElement<P2>();
+                    deleteElement<P2>(p2);
+                    P3* p3 = newElement<P3>();
+                    deleteElement<P3>(p3);
+                    P4* p4 = newElement<P4>();
+                    deleteElement<P4>(p4);
+				}
+				size_t end1 = clock();
+
+				total_costtime += end1 - begin1;
+			}
+		});
+	}
+	for (auto& t : vthread)
+	{
+		t.join();
+	}
+	printf("%lu个线程并发执行%lu轮次，每轮次newElement&deleteElement %lu次，总计花费：%lu ms\n", nworks, rounds, ntimes, total_costtime);
+}
+
+void BenchmarkNew(size_t ntimes, size_t nworks, size_t rounds)
+{
+	std::vector<std::thread> vthread(nworks);
+	size_t total_costtime = 0;
+	for (size_t k = 0; k < nworks; ++k)
+	{
+		vthread[k] = std::thread([&]() {
+			for (size_t j = 0; j < rounds; ++j)
+			{
+				size_t begin1 = clock();
+				for (size_t i = 0; i < ntimes; i++)
+				{
+                    P1* p1 = new P1;
+                    delete p1;
+                    P2* p2 = new P2;
+                    delete p2;
+                    P3* p3 = new P3;
+                    delete p3;
+                    P4* p4 = new P4;
+                    delete p4;
+				}
+				size_t end1 = clock();
+				
+				total_costtime += end1 - begin1;
+			}
+		});
+	}
+	for (auto& t : vthread)
+	{
+		t.join();
+	}
+	printf("%lu个线程并发执行%lu轮次，每轮次malloc&free %lu次，总计花费：%lu ms\n", nworks, rounds, ntimes, total_costtime);
+}
+
+int main()
+{
+    HashBucket::initMemoryPool(); // 使用内存池接口前一定要先调用该函数
+	BenchmarkMemoryPool(100, 1, 10); // 测试内存池
+	BenchmarkNew(100, 1, 10); // 测试 new delete
+	std::cout << "---------------------------------------" << std::endl;
+	BenchmarkMemoryPool(100, 3, 10); // 测试内存池
+	BenchmarkNew(100, 3, 10); // 测试 new delete
+	std::cout << "---------------------------------------" << std::endl;
+	BenchmarkMemoryPool(100, 3, 50); // 测试内存池
+	BenchmarkNew(100, 3, 50); // 测试 new delete
+	return 0;
+}
+```
+##### 代码目的
+这段代码的目的是测试和比较自定义内存池与标准 new/delete 操作在多线程环境下的性能。通过创建多个线程并发地进行内存分配和释放操作，来评估内存池的效率。
+##### 关键组件
+类定义：P1, P2, P3, P4 是用于测试的简单类，分别占用不同大小的内存。
+BenchmarkMemoryPool 函数：测试自定义内存池的性能。
+BenchmarkNew 函数：测试标准 new/delete 的性能。
+main 函数：初始化内存池并调用测试函数。
+##### 测试流程
+初始化：在 main 函数中，首先调用 HashBucket::initMemoryPool() 初始化内存池。
+内存池测试：
+BenchmarkMemoryPool 函数创建 nworks 个线程。
+每个线程执行 rounds 轮次，每轮次进行 ntimes 次内存分配和释放。
+使用 newElement 和 deleteElement 函数进行内存操作。
+记录并输出总耗时。
+标准分配测试：
+BenchmarkNew 函数与 BenchmarkMemoryPool 类似，但使用标准 new 和 delete。
+记录并输出总耗时。
+##### 结果分析
+输出格式：%lu个线程并发执行%lu轮次，每轮次newElement&deleteElement %lu次，总计花费：%lu ms
+比较：通过比较两次测试的总耗时，评估自定义内存池相对于标准 new/delete 的性能优势。
+##### 结论
+性能提升：如果自定义内存池的耗时显著低于标准 new/delete，则说明内存池在多线程环境下具有更高的效率。
+优化方向：如果内存池性能不佳，可以考虑优化内存池的实现，如减少锁竞争、提高缓存命中率等。
+##### 注意事项
+线程安全：确保内存池实现是线程安全的，避免数据竞争。
+测试环境：在不同硬件和操作系统上测试，可能会得到不同的结果。
+参数调整：可以调整 ntimes, nworks, rounds 参数，观察不同负载下的性能表现。
 通过上述测试结果可以看出该内存池的性能甚至不如直接使用系统调用 malloc 和 free，所以根据优化方案就有了v2很和v3。
 
 ### v2
